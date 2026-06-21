@@ -11,10 +11,11 @@
 //! demux → resample → VAD → Whisper, without worrying about codec edge cases.
 
 use anyhow::{Context, Result, anyhow};
-use symphonia::core::audio::AudioBufferRef;
-use symphonia::core::codecs::{Decoder, DecoderOptions};
+use symphonia::core::audio::GenericAudioBufferRef;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{Packet, Track};
+use symphonia::core::formats::Track;
+use symphonia::core::packet::Packet;
 
 /// Create a decoder for the given audio track.
 ///
@@ -23,11 +24,16 @@ use symphonia::core::formats::{Packet, Track};
 /// Fails if:
 /// - the codec is unsupported
 /// - the codec parameters are invalid
-pub fn make_decoder_for_track(track: &Track) -> Result<Box<dyn Decoder>> {
-    let decoder_opts: DecoderOptions = Default::default();
+pub fn make_decoder_for_track(track: &Track) -> Result<Box<dyn AudioDecoder>> {
+    let decoder_opts: AudioDecoderOptions = Default::default();
+    let codec_params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or_else(|| anyhow!("audio track is missing audio codec parameters"))?;
 
     symphonia::default::get_codecs()
-        .make(&track.codec_params, &decoder_opts)
+        .make_audio_decoder(codec_params, &decoder_opts)
         .map_err(|e| anyhow!(e))
         .context("failed to create decoder for audio track")
 }
@@ -47,9 +53,9 @@ pub fn make_decoder_for_track(track: &Track) -> Result<Box<dyn Decoder>> {
 /// - `IoError`     → treat as end-of-stream (streaming-friendly)
 /// - other errors  → bubble up with context
 pub fn decode_packet_and_then(
-    decoder: &mut Box<dyn Decoder>,
+    decoder: &mut Box<dyn AudioDecoder>,
     packet: &Packet,
-    mut on_decoded: impl FnMut(AudioBufferRef<'_>) -> Result<()>,
+    mut on_decoded: impl FnMut(GenericAudioBufferRef<'_>) -> Result<()>,
 ) -> Result<bool> {
     match decoder.decode(packet) {
         Ok(buf) => {

@@ -93,7 +93,7 @@ fn decode_impl(
         };
 
         // Ignore packets from non-audio tracks.
-        if packet.track_id() != track.id {
+        if packet.track_id != track.id {
             continue;
         }
 
