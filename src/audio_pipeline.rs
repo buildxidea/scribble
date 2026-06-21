@@ -11,20 +11,20 @@
 //! - `finalize()` should be called at end-of-stream to flush any remaining resampler input.
 
 use anyhow::{Context, Result, anyhow, bail};
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
     Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,
 };
-use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
+use symphonia::core::audio::GenericAudioBufferRef;
 
 /// Scribble's target mono sample rate (Hz).
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// A small stateful pipeline that converts decoded audio into mono 16 kHz `f32` chunks.
 pub struct AudioPipeline {
-    // Scratch buffer used to copy decoded PCM into an interleaved `Vec<f32>`.
-    sample_buf_f32: Option<SampleBuffer<f32>>,
+    // Scratch buffer used to copy decoded PCM into interleaved `f32` samples.
+    sample_buf_f32: Vec<f32>,
 
     // Lazily initialized resampler (only needed when the source sample rate != 16 kHz).
     resampler: Option<Async<f32>>,
@@ -50,7 +50,7 @@ impl AudioPipeline {
     /// Create a new audio pipeline with empty internal buffers.
     pub fn new() -> Self {
         Self {
-            sample_buf_f32: None,
+            sample_buf_f32: Vec::new(),
             resampler: None,
             mono_src_acc: Vec::new(),
             resample_in: vec![Vec::new()],
@@ -64,14 +64,13 @@ impl AudioPipeline {
     /// Returning `Ok(false)` signals “stop early”.
     pub fn push_decoded_and_emit(
         &mut self,
-        decoded: &AudioBufferRef<'_>,
+        decoded: &GenericAudioBufferRef<'_>,
         target_chunk_frames: usize,
         mut emit: impl FnMut(&[f32]) -> Result<bool>,
     ) -> Result<()> {
-        let (interleaved, src_rate, channels) =
-            decoded_to_interleaved_f32(decoded, &mut self.sample_buf_f32)?;
+        let (src_rate, channels) = decoded_to_interleaved_f32(decoded, &mut self.sample_buf_f32)?;
 
-        let mono_src = downmix_to_mono(&interleaved, channels);
+        let mono_src = downmix_to_mono(&self.sample_buf_f32, channels);
 
         // Fast path: already at the target sample rate.
         if src_rate == TARGET_SAMPLE_RATE {
@@ -224,38 +223,18 @@ impl AudioPipeline {
 }
 
 fn decoded_to_interleaved_f32(
-    decoded: &AudioBufferRef<'_>,
-    sample_buf_f32: &mut Option<SampleBuffer<f32>>,
-) -> Result<(Vec<f32>, u32, usize)> {
-    ensure_sample_buffer(decoded, sample_buf_f32);
+    decoded: &GenericAudioBufferRef<'_>,
+    sample_buf_f32: &mut Vec<f32>,
+) -> Result<(u32, usize)> {
+    decoded.copy_to_vec_interleaved(sample_buf_f32);
 
-    let buf = sample_buf_f32
-        .as_mut()
-        .ok_or_else(|| anyhow!("sample buffer not initialized"))?;
-
-    // Copy decoded PCM into our interleaved scratch buffer.
-    buf.copy_interleaved_ref(decoded.clone());
-
-    let src_rate = decoded.spec().rate;
-    let channels = decoded.spec().channels.count();
+    let src_rate = decoded.spec().rate();
+    let channels = decoded.spec().channels().count();
     if channels == 0 {
         bail!("decoded audio had zero channels");
     }
 
-    Ok((buf.samples().to_vec(), src_rate, channels))
-}
-
-fn ensure_sample_buffer(
-    decoded: &AudioBufferRef<'_>,
-    sample_buf_f32: &mut Option<SampleBuffer<f32>>,
-) {
-    if sample_buf_f32.is_some() {
-        return;
-    }
-
-    let spec = *decoded.spec();
-    let duration = decoded.capacity() as u64;
-    *sample_buf_f32 = Some(SampleBuffer::<f32>::new(duration, spec));
+    Ok((src_rate, channels))
 }
 
 /// Downmix interleaved samples into mono by averaging channels.

@@ -10,12 +10,13 @@
 //! - Provide a `next_packet` helper that treats IO errors as end-of-stream
 
 use anyhow::{Context, Result, anyhow};
-use symphonia::core::codecs::CODEC_TYPE_NULL;
+use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, Packet, Track};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, Track};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::packet::Packet;
 
 /// Probe the container and pick a default audio track.
 ///
@@ -44,17 +45,23 @@ pub fn probe_source_and_pick_default_track(
     let format_opts: FormatOptions = Default::default();
     let metadata_opts: MetadataOptions = Default::default();
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
+    let format = symphonia::default::get_probe()
+        .probe(&hint, mss, format_opts, metadata_opts)
         .map_err(|e| anyhow!(e))
         .context("failed to probe media stream")?;
-
-    let format = probed.format;
 
     let track = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some())
+        .find(|track| {
+            track
+                .codec_params
+                .as_ref()
+                .and_then(|params| params.audio())
+                .is_some_and(|params| {
+                    params.codec != CODEC_ID_NULL_AUDIO && params.sample_rate.is_some()
+                })
+        })
         .cloned()
         .ok_or_else(|| anyhow!("no audio track found"))?;
 
@@ -68,7 +75,7 @@ pub fn probe_source_and_pick_default_track(
 /// - other errors are surfaced with context
 pub fn next_packet(format: &mut Box<dyn FormatReader>) -> Result<Option<Packet>> {
     match format.next_packet() {
-        Ok(p) => Ok(Some(p)),
+        Ok(packet) => Ok(packet),
         Err(SymphoniaError::IoError(_)) => Ok(None),
         Err(e) => Err(anyhow!(e)).context("failed reading packet"),
     }

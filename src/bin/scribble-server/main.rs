@@ -321,10 +321,10 @@ fn probe_source_and_pick_default_track(
     Box<dyn symphonia::core::formats::FormatReader>,
     symphonia::core::formats::Track,
 )> {
-    use symphonia::core::codecs::CODEC_TYPE_NULL;
+    use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
+    use symphonia::core::formats::probe::Hint;
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
     let mss_opts = MediaSourceStreamOptions {
         buffer_len: 256 * 1024,
@@ -340,17 +340,23 @@ fn probe_source_and_pick_default_track(
     let format_opts: symphonia::core::formats::FormatOptions = Default::default();
     let metadata_opts: MetadataOptions = Default::default();
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
+    let format = symphonia::default::get_probe()
+        .probe(&hint, mss, format_opts, metadata_opts)
         .map_err(|e| anyhow!(e))
         .context("failed to probe media stream")?;
-
-    let format = probed.format;
 
     let track = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some())
+        .find(|track| {
+            track
+                .codec_params
+                .as_ref()
+                .and_then(|params| params.audio())
+                .is_some_and(|params| {
+                    params.codec != CODEC_ID_NULL_AUDIO && params.sample_rate.is_some()
+                })
+        })
         .cloned()
         .ok_or_else(|| anyhow!("no audio track found"))?;
 
